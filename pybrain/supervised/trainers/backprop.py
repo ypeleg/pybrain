@@ -9,6 +9,38 @@ from pybrain.supervised.trainers.trainer import Trainer
 from pybrain.utilities import fListToString
 from pybrain.auxiliary import GradientDescent
 
+from Queue import Queue
+from threading import Thread
+
+class Worker(Thread):
+    """Thread executing tasks from a given tasks queue"""
+    def __init__(self, tasks):
+        Thread.__init__(self)
+        self.tasks = tasks
+        self.daemon = True
+        self.start()
+
+    def run(self):
+        while True:
+            func, args, kargs = self.tasks.get()
+            try: func(*args, **kargs)
+            except Exception, e: print e
+            self.tasks.task_done()
+
+class ThreadPool:
+    """Pool of threads consuming tasks from a queue"""
+    def __init__(self, num_threads):
+        self.tasks = Queue(num_threads)
+        for _ in range(num_threads): Worker(self.tasks)
+
+    def add_task(self, func, *args, **kargs):
+        """Add a task to the queue"""
+        self.tasks.put((func, args, kargs))
+
+    def wait_completion(self):
+        """Wait for completion of all the tasks in the queue"""
+        self.tasks.join()
+        
 
 class BackpropTrainer(Trainer):
     """Trainer that trains the parameters of a module according to a
@@ -51,14 +83,15 @@ class BackpropTrainer(Trainer):
         """Train the associated module for one epoch."""
         assert len(self.ds) > 0, "Dataset cannot be empty."
         self.module.resetDerivatives()
-        errors = 0
+        errors = 0        
         ponderation = 0.
         shuffledSequences = []
         for seq in self.ds._provideSequences():
             shuffledSequences.append(seq)
         shuffle(shuffledSequences)
+
         for seq in shuffledSequences:
-            e, p = self._calcDerivs(seq)
+            e, p = self._calc_derives_of_module(seq,self.module)
             errors += e
             ponderation += p
             if not self.batchlearning:
@@ -69,14 +102,42 @@ class BackpropTrainer(Trainer):
                 self.module.resetDerivatives()
 
         if self.verbose:
-            print("Total error: {z: .12g}".format(z=errors / ponderation))
+            print "Total error:", errors / ponderation
         if self.batchlearning:
             self.module._setParameters(self.descent(self.module.derivs))
         self.epoch += 1
         self.totalepochs += 1
         return errors / ponderation
 
+    def _calc_derives_of_module(self, seq,module):
+        """Calculate error function and backpropagate output errors to yield
+        the gradient."""
+        module.reset()
+        for sample in seq:
+            module.activate(sample[0])
+        error = 0
+        ponderation = 0.
+        for offset, sample in reversed(list(enumerate(seq))):
+            # need to make a distinction here between datasets containing
+            # importance, and others
+            target = sample[1]
+            outerr = target - module.outputbuffer[offset]
+            if len(sample) > 2:
+                importance = sample[2]
+                error += 0.5 * dot(importance, outerr ** 2)
+                ponderation += sum(importance)
+                module.backActivate(outerr * importance)
+            else:
+                error += 0.5 * sum(outerr ** 2)
+                ponderation += len(target)
+                # FIXME: the next line keeps arac from producing NaNs. I don't
+                # know why that is, but somehow the __str__ method of the
+                # ndarray class fixes something,
+                str(outerr)
+                module.backActivate(outerr)
 
+        return error, ponderation
+        
     def _calcDerivs(self, seq):
         """Calculate error function and backpropagate output errors to yield
         the gradient."""
